@@ -1,15 +1,19 @@
 """
 Usage:
-    python3 count_incomplete_tasks.py <PLAN_ID>
+    python3 count_incomplete_tasks.py <PLAN_ID> [--no-missing-description] [--no-oldest-tasks]
 
 Arguments:
     <PLAN_ID>   The Microsoft Planner Plan ID to fetch tasks for. Required.
+    --no-missing-description   (Optional) If set, disables the display of tasks with no description.
+    --no-oldest-tasks         (Optional) If set, disables the display of the 10 oldest not completed tasks.
 
 Alternatively, you can set the PLAN_ID environment variable:
     export PLAN_ID=your_plan_id
     python3 count_incomplete_tasks.py
 
 The script will use the TOKEN environment variable for authentication.
+
+By default, the script displays a list of tasks with no description and the 10 oldest not completed tasks. Use --no-missing-description and/or --no-oldest-tasks to disable these outputs.
 """
 
 import json
@@ -18,6 +22,7 @@ from datetime import datetime, timezone
 import os
 import requests
 import sys
+from dateutil import parser as date_parser
 
 # Get token from environment only
 TOKEN = os.getenv("TOKEN")
@@ -25,9 +30,18 @@ if not TOKEN:
     print("TOKEN environment variable is required.")
     exit(1)
 
-# Get PLAN_ID from command line or environment, no default
-if len(sys.argv) > 1:
-    PLAN_ID = sys.argv[1]
+# Parse command line options
+show_missing_description = True
+show_oldest_tasks = True
+args = sys.argv[1:]
+if "--no-missing-description" in args:
+    show_missing_description = False
+    args.remove("--no-missing-description")
+if "--no-oldest-tasks" in args:
+    show_oldest_tasks = False
+    args.remove("--no-oldest-tasks")
+if len(args) > 0:
+    PLAN_ID = args[0]
 else:
     PLAN_ID = os.getenv("PLAN_ID")
 if not PLAN_ID:
@@ -61,6 +75,8 @@ def get_username(user_id):
     return USER_LOOKUP.get(user_id, user_id)
 
 # Change the source of tasks to match new JSON structure
+no_description_tasks = []
+oldest_not_completed = []
 for task in data.get("value", []):
     percent = task.get("percentComplete", 0)
     due = task.get("dueDateTime")
@@ -95,6 +111,25 @@ for task in data.get("value", []):
             user_stats[user_id]["late"] += 1
     if is_late:
         total_late += 1
+    if not task.get("hasDescription", False) and percent < 100:
+        # Get assignees
+        assignees = []
+        if "assignments" in task and task["assignments"]:
+            for user_id in task["assignments"].keys():
+                assignees.append(get_username(user_id))
+        if not assignees:
+            assignees = ["Unassigned"]
+        no_description_tasks.append((task.get("title", "<no title>"), assignees))
+    if percent < 100:
+        created = task.get("createdDateTime")
+        if created:
+            assignees = []
+            if "assignments" in task and task["assignments"]:
+                for user_id in task["assignments"].keys():
+                    assignees.append(get_username(user_id))
+            if not assignees:
+                assignees = ["Unassigned"]
+            oldest_not_completed.append((created, task.get("title", "<no title>"), assignees))
 
 for user_id, stats in user_stats.items():
     print(f"User {get_username(user_id)}: Completed: {stats['completed']}, In Progress: {stats['in_progress']}, Not Started: {stats['not_started']}, Late: {stats['late']}")
@@ -104,3 +139,21 @@ print(f"Completed: {total_completed}")
 print(f"In Progress: {total_in_progress}")
 print(f"Not Started: {total_not_started}")
 print(f"Late: {total_late}")
+
+if show_missing_description:
+    print(f"\nTasks with no description: {len(no_description_tasks)}")
+    for title, assignees in no_description_tasks:
+        print(f"- {title} (Assignee(s): {', '.join(assignees)})")
+
+# Print 10 oldest not completed tasks
+if show_oldest_tasks and oldest_not_completed:
+    print("\n10 oldest not completed tasks:")
+    # Sort by createdDateTime ascending
+    oldest_not_completed.sort(key=lambda x: date_parser.parse(x[0]))
+    for created, title, assignees in oldest_not_completed[:10]:
+        try:
+            dt = date_parser.parse(created)
+            created_str = dt.strftime('%Y-%m-%d %H:%M')
+        except Exception:
+            created_str = created
+        print(f"- {title} (Created: {created_str}, Assignee(s): {', '.join(assignees)})")
